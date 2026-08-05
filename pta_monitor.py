@@ -1057,6 +1057,7 @@ class PTAMonitorApp:
 
 def main() -> None:
     root = tk.Tk()
+    root.state("zoomed")
     app = PTAMonitorApp(root)
     root.protocol("WM_DELETE_WINDOW", lambda: (app.shutdown(), root.destroy()))
     root.mainloop()
