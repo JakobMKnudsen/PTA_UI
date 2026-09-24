@@ -859,6 +859,8 @@ class PTAMonitorApp:
 
         unit = self.unit_var.get()
         factor = UNIT_FACTORS.get(unit, 1.0)
+        decimals = self._get_export_decimal_places(unit)
+        value_fmt = f"{{:.{decimals}f}}"
 
         with out.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
@@ -882,9 +884,7 @@ class PTAMonitorApp:
                         row.append(last_saved_by_channel.get(ch, ""))
                         continue
                     tared_bar = s.raw_bar - self.baseline_bar.get(ch, 0.0)
-                    # Save full float resolution (round-trip safe) rather than
-                    # display-style rounded values.
-                    saved = format(tared_bar * factor, ".17g")
+                    saved = value_fmt.format(tared_bar * factor)
                     row.append(saved)
                     last_saved_by_channel[ch] = saved
                 w.writerow(row)
@@ -896,6 +896,45 @@ class PTAMonitorApp:
         self.capture_mode_active = False
         self.capture_mode_running = False
         self._update_take_data_button_text()
+
+    def _get_export_decimal_places(self, unit: str) -> int:
+        # Unit bounds keep output practical while still allowing range-driven
+        # precision adjustments for narrow spans.
+        unit_min = {
+            "bar": 3,
+            "mbar": 1,
+            "psi": 2,
+            "psf": 0,
+            "in H2O": 1,
+        }
+        unit_max = {
+            "bar": 6,
+            "mbar": 3,
+            "psi": 4,
+            "psf": 2,
+            "in H2O": 3,
+        }
+
+        min_dp = unit_min.get(unit, 2)
+        max_dp = unit_max.get(unit, 4)
+
+        try:
+            vmin = float(self.min_var.get())
+            vmax = float(self.max_var.get())
+            span = abs(vmax - vmin)
+        except ValueError:
+            span = 0.0
+
+        if span <= 0:
+            return min_dp
+
+        # Aim for around 2000 quantization steps across current display range.
+        step = span / 2000.0
+        if step <= 0:
+            return max_dp
+
+        dynamic_dp = max(0, int(math.ceil(-math.log10(step))))
+        return max(min_dp, min(max_dp, dynamic_dp))
 
         messagebox.showinfo("Saved", f"Saved {len(rows)} captures to:\n{out}")
 
