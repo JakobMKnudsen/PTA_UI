@@ -20,6 +20,7 @@ value:    derived from observed payload bytes and baseline-tared in UI
 from __future__ import annotations
 
 import csv
+import math
 import queue
 import struct
 import threading
@@ -119,37 +120,51 @@ class ChannelGauge:
     def __init__(self, parent: tk.Widget, channel: int, on_toggle_channel=None) -> None:
         self.channel = channel
         self.on_toggle_channel = on_toggle_channel
-        self.frame = ttk.Frame(parent, padding=4)
+        self.frame = ttk.Frame(parent, padding=0)
         self.frame.configure(width=34, height=404)
         self.frame.pack_propagate(False)
         self.frame.grid_propagate(False)
+
+        self.base_frame_w = 34
+        self.base_bar_h = 280
+        self.base_bar_w = 16
+        self.base_value_w = 24
+        self.base_value_h = 96
+        self.base_led = 14
+        self.base_title_h = 18
+        self.base_gap = 4
+        self.base_pad = 4
+
+        self._current_ratio = 0.0
+        self.bar_draw_top = 0
+        self.bar_draw_bottom = 0
+
         self.title = ttk.Label(self.frame, text=f"{channel:02d}")
-        self.title.pack()
+        self.title.place(x=0, y=0)
 
         self.led_canvas = tk.Canvas(self.frame, width=14, height=14, bg="#0f172a", highlightthickness=0)
-        self.led_canvas.pack()
         self.led = self.led_canvas.create_oval(2, 2, 12, 12, fill="#334155", outline="#1e293b")
 
         self.led_canvas.bind("<Button-1>", self._handle_toggle_click)
         self.title.bind("<Button-1>", self._handle_toggle_click)
 
-        self.canvas_h = 280
-        self.canvas_w = 16
+        self.canvas_h = self.base_bar_h
+        self.canvas_w = self.base_bar_w
         self.canvas = tk.Canvas(self.frame, width=self.canvas_w, height=self.canvas_h, bg="#0b1220", highlightthickness=1, highlightbackground="#1f2937")
-        self.canvas.pack(pady=(4, 2))
         self.bar = self.canvas.create_rectangle(4, self.canvas_h - 2, self.canvas_w - 4, self.canvas_h - 2, fill="#1f9d55", outline="")
 
-        self.value_canvas = tk.Canvas(self.frame, width=24, height=96, bg="#111827", highlightthickness=0)
-        self.value_canvas.pack(pady=(0, 2))
+        self.value_canvas = tk.Canvas(self.frame, width=self.base_value_w, height=self.base_value_h, bg="#111827", highlightthickness=0)
         self.value_text = self.value_canvas.create_text(
-            12,
-            48,
+            self.base_value_w // 2,
+            self.base_value_h // 2,
             text="--",
             fill="#dbeafe",
             angle=90,
             anchor="center",
             font=("Consolas", 8),
         )
+
+        self.configure_layout(1.0)
 
     def _format_value_text(self, value: float) -> str:
         abs_v = abs(value)
@@ -178,10 +193,8 @@ class ChannelGauge:
 
         ratio = (value - vmin) / (vmax - vmin)
         ratio = max(0.0, min(1.0, ratio))
-        filled_h = int(ratio * (self.canvas_h - 4))
-
-        y0 = self.canvas_h - 2 - filled_h
-        self.canvas.coords(self.bar, 4, y0, self.canvas_w - 4, self.canvas_h - 2)
+        self._current_ratio = ratio
+        self._render_bar()
 
         if ratio < 0.6:
             color = "#2ecc71"
@@ -194,6 +207,51 @@ class ChannelGauge:
 
     def set_text(self, text: str) -> None:
         self.value_canvas.itemconfig(self.value_text, text=text)
+
+    def configure_layout(self, scale: float) -> None:
+        title_h = max(14, int(self.base_title_h * scale))
+        led = max(10, int(self.base_led * scale))
+        gap = max(2, int(self.base_gap * scale))
+        pad = max(2, int(self.base_pad * scale))
+        self.canvas_h = max(150, int(self.base_bar_h * scale))
+        self.canvas_w = max(10, int(self.base_bar_w * scale))
+        value_h = max(52, int(self.base_value_h * scale))
+        value_w = max(16, int(self.base_value_w * scale))
+
+        frame_w = max(self.canvas_w + 12, value_w + 6, int(self.base_frame_w * scale))
+        frame_h = pad + title_h + gap + led + gap + self.canvas_h + gap + value_h + pad
+        self.frame.configure(width=frame_w, height=frame_h)
+
+        self.title.configure(font=("Segoe UI", max(7, int(9 * scale))))
+        self.title.place(x=0, y=pad, width=frame_w, height=title_h)
+
+        led_x = (frame_w - led) // 2
+        led_y = pad + title_h + gap
+        self.led_canvas.configure(width=led, height=led)
+        self.led_canvas.place(x=led_x, y=led_y, width=led, height=led)
+        self.led_canvas.coords(self.led, 1, 1, max(2, led - 2), max(2, led - 2))
+
+        bar_x = (frame_w - self.canvas_w) // 2
+        bar_y = led_y + led + gap
+        self.canvas.configure(width=self.canvas_w, height=self.canvas_h)
+        self.canvas.place(x=bar_x, y=bar_y, width=self.canvas_w, height=self.canvas_h)
+
+        self.bar_draw_top = bar_y + 2
+        self.bar_draw_bottom = bar_y + self.canvas_h - 2
+
+        value_x = (frame_w - value_w) // 2
+        value_y = bar_y + self.canvas_h + gap
+        self.value_canvas.configure(width=value_w, height=value_h)
+        self.value_canvas.place(x=value_x, y=value_y, width=value_w, height=value_h)
+        self.value_canvas.itemconfig(self.value_text, font=("Consolas", max(6, int(8 * scale))))
+        self.value_canvas.coords(self.value_text, value_w // 2, value_h // 2)
+
+        self._render_bar()
+
+    def _render_bar(self) -> None:
+        filled_h = int(self._current_ratio * (self.canvas_h - 4))
+        y0 = self.canvas_h - 2 - filled_h
+        self.canvas.coords(self.bar, 2, y0, self.canvas_w - 2, self.canvas_h - 2)
 
 
 class PTAMonitorApp:
@@ -213,6 +271,10 @@ class PTAMonitorApp:
         self.channel_latest: Dict[int, Sample] = {}
         self.channel_last_seen: Dict[int, float] = {}
         self.pending_samples: Dict[int, Sample] = {}
+        self.last_accepted_raw_bar: Dict[int, float] = {}
+        self.pending_step_raw_bar: Dict[int, float] = {}
+        self.max_single_step_bar = 5.0
+        self.step_confirm_tolerance_bar = 0.5
 
         self.channel_enabled: Dict[int, tk.BooleanVar] = {
             ch: tk.BooleanVar(value=False) for ch in range(1, 25)
@@ -239,9 +301,17 @@ class PTAMonitorApp:
         self.last_init_sent = 0
         self.last_init_note = "not-run"
         self.poll_start_index = 0
+        self.live_layout_job: Optional[str] = None
+        self.live_scale = 1.0
+        self.live_base_axis_w = 56
+        self.live_axis_w = self.live_base_axis_w
+        self.live_bar_top = 8
+        self.live_bar_bottom = 288
 
         self._build_ui()
         self._refresh_ports()
+        self.root.bind("<Configure>", self._on_root_configure)
+        self.root.after(100, self._apply_live_layout)
         self.root.after(50, self._drain_ui_queue)
 
     def _init_style(self) -> None:
@@ -366,6 +436,8 @@ class PTAMonitorApp:
 
         gauges_panel = ttk.Frame(main, style="Panel.TFrame")
         gauges_panel.pack(fill=tk.BOTH, expand=True)
+        gauges_panel.grid_rowconfigure(1, weight=1)
+        gauges_panel.grid_columnconfigure(0, weight=1)
 
         ttk.Label(
             gauges_panel,
@@ -375,15 +447,18 @@ class PTAMonitorApp:
 
         bars_holder = ttk.Frame(gauges_panel, style="Panel.TFrame")
         bars_holder.grid(row=1, column=0, columnspan=24, sticky="nsew", pady=(2, 0))
+        bars_holder.grid_rowconfigure(0, weight=1)
+        bars_holder.grid_columnconfigure(1, weight=1)
+        self.bars_holder = bars_holder
 
         self.axis_canvas = tk.Canvas(
             bars_holder,
             width=56,
-            height=330,
+            height=404,
             bg="#111827",
             highlightthickness=0,
         )
-        self.axis_canvas.pack(side=tk.LEFT, padx=(6, 4), fill=tk.Y)
+        self.axis_canvas.grid(row=0, column=0, sticky="ns", padx=(6, 4))
 
         self.axis_tick_lines = []
         self.axis_tick_text = []
@@ -394,12 +469,13 @@ class PTAMonitorApp:
             self.axis_tick_text.append(text)
 
         bars_frame = ttk.Frame(bars_holder, style="Panel.TFrame")
-        bars_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bars_frame.grid(row=0, column=1, sticky="nsew")
+        self.bars_frame = bars_frame
 
         self.gauges: Dict[int, ChannelGauge] = {}
         for idx, ch in enumerate(range(1, 25)):
-            g = ChannelGauge(gauges_panel, ch, on_toggle_channel=self._toggle_channel_from_led)
-            g.frame.grid(in_=bars_frame, row=0, column=idx, padx=1, pady=4, sticky="n")
+            g = ChannelGauge(bars_frame, ch, on_toggle_channel=self._toggle_channel_from_led)
+            g.frame.grid(row=0, column=idx, padx=1, pady=0, sticky="n")
             self.gauges[ch] = g
 
         logging_panel = ttk.Frame(main, style="Panel.TFrame", padding=(8, 8, 8, 8))
@@ -501,27 +577,75 @@ class PTAMonitorApp:
         if vmax <= vmin:
             vmax = vmin + 1.0
 
-        top_y = 8
-        bot_y = 288
+        top_y = self.live_bar_top
+        bot_y = self.live_bar_bottom
         span = bot_y - top_y
         for i in range(5):
             frac = i / 4.0
             y = bot_y - frac * span
             val = vmin + frac * (vmax - vmin)
-            self.axis_canvas.coords(self.axis_tick_lines[i], 44, y, 54, y)
-            self.axis_canvas.coords(self.axis_tick_text[i], 40, y)
+            line_x2 = self.live_axis_w - 2
+            line_x1 = self.live_axis_w - 12
+            text_x = self.live_axis_w - 16
+            self.axis_canvas.coords(self.axis_tick_lines[i], line_x1, y, line_x2, y)
+            self.axis_canvas.coords(self.axis_tick_text[i], text_x, y)
             self.axis_canvas.itemconfig(self.axis_tick_text[i], text=f"{val:.0f}")
 
         self.axis_canvas.delete("axis_unit")
         self.axis_canvas.create_text(
-            10,
+            12,
             (top_y + bot_y) / 2,
             text=unit,
             fill="#93c5fd",
             angle=90,
             tags="axis_unit",
-            font=("Segoe UI Semibold", 8),
+            font=("Segoe UI Semibold", max(7, int(8 * self.live_scale))),
         )
+
+    def _on_root_configure(self, event) -> None:
+        if event.widget is not self.root:
+            return
+        if self.live_layout_job is not None:
+            try:
+                self.root.after_cancel(self.live_layout_job)
+            except Exception:
+                pass
+        self.live_layout_job = self.root.after(60, self._apply_live_layout)
+
+    def _apply_live_layout(self) -> None:
+        self.live_layout_job = None
+        if not hasattr(self, "bars_holder"):
+            return
+
+        holder_w = max(1, self.bars_holder.winfo_width())
+        holder_h = max(1, self.bars_holder.winfo_height())
+        if holder_w <= 1 or holder_h <= 1:
+            return
+
+        base_gauge_w = 34
+        base_gauge_h = 404
+        base_axis_w = self.live_base_axis_w
+        gauge_gap = 2
+
+        base_total_w = (24 * base_gauge_w) + (24 * gauge_gap) + base_axis_w + 10
+        base_total_h = base_gauge_h
+
+        scale_w = holder_w / max(1, base_total_w)
+        scale_h = holder_h / max(1, base_total_h)
+        scale = max(0.58, min(1.8, min(scale_w, scale_h)))
+        self.live_scale = scale
+
+        for gauge in self.gauges.values():
+            gauge.configure_layout(scale)
+
+        gauge_h = max(g.frame.winfo_height() for g in self.gauges.values())
+        self.live_axis_w = max(44, int(base_axis_w * scale))
+        self.axis_canvas.configure(width=self.live_axis_w, height=gauge_h)
+
+        # Axis labels must align with the actual bar drawable region.
+        ref_gauge = self.gauges[1]
+        self.live_bar_top = ref_gauge.bar_draw_top
+        self.live_bar_bottom = ref_gauge.bar_draw_bottom
 
     def start_pta(self) -> None:
         if self.running:
@@ -559,6 +683,8 @@ class PTAMonitorApp:
         self.stop_event.clear()
         self.rx_buffer.clear()
         self.pending_samples.clear()
+        self.last_accepted_raw_bar.clear()
+        self.pending_step_raw_bar.clear()
         self.baseline_bar.clear()
         self.baseline_acc = {ch: [] for ch in range(1, 25)}
         self.rx_full9_count = 0
@@ -782,6 +908,8 @@ class PTAMonitorApp:
                 sample = self._read_one_response(ch, req[3], timeout_s=0.0035)
                 if sample is None:
                     continue
+                if not self._accept_sample(sample):
+                    continue
 
                 # Keep one timestamp per cycle to mirror legacy grouped sampling.
                 sample.timestamp = cycle_timestamp
@@ -807,6 +935,8 @@ class PTAMonitorApp:
 
                     sample = self._read_one_response(ch, req[3], timeout_s=timeout_s)
                     if sample is None:
+                        continue
+                    if not self._accept_sample(sample):
                         continue
 
                     sample.timestamp = cycle_timestamp
@@ -846,6 +976,36 @@ class PTAMonitorApp:
             # Measure effective cycle period including pacing sleep.
             total_cycle_s = time.time() - cycle_start
             self.last_cycle_ms = total_cycle_s * 1000.0
+
+    def _accept_sample(self, sample: Sample) -> bool:
+        raw = sample.raw_bar
+
+        # Hard reject impossible float results from framing glitches.
+        if not math.isfinite(raw) or abs(raw) > 10000.0:
+            return False
+
+        ch = sample.channel
+        prev = self.last_accepted_raw_bar.get(ch)
+        if prev is None:
+            self.last_accepted_raw_bar[ch] = raw
+            self.pending_step_raw_bar.pop(ch, None)
+            return True
+
+        delta = abs(raw - prev)
+        if delta <= self.max_single_step_bar:
+            self.last_accepted_raw_bar[ch] = raw
+            self.pending_step_raw_bar.pop(ch, None)
+            return True
+
+        # Require one repeat for large step changes to avoid one-off spikes.
+        pending = self.pending_step_raw_bar.get(ch)
+        self.pending_step_raw_bar[ch] = raw
+        if pending is not None and abs(raw - pending) <= self.step_confirm_tolerance_bar:
+            self.last_accepted_raw_bar[ch] = raw
+            self.pending_step_raw_bar.pop(ch, None)
+            return True
+
+        return False
 
     def _read_one_response(self, channel: int, cmd: int, timeout_s: float) -> Optional[Sample]:
         assert self.serial_port is not None
