@@ -590,19 +590,32 @@ class PTAMonitorApp:
         if vmax <= vmin:
             vmax = vmin + 1.0
 
+        span = abs(vmax - vmin)
+        # Choose decimals from tick spacing so narrow ranges show fractional labels.
+        tick_step = span / 4.0
+        if tick_step >= 10:
+            label_decimals = 0
+        elif tick_step >= 1:
+            label_decimals = 1
+        elif tick_step >= 0.1:
+            label_decimals = 2
+        else:
+            label_decimals = 3
+        tick_fmt = f"{{:.{label_decimals}f}}"
+
         top_y = self.live_bar_top
         bot_y = self.live_bar_bottom
-        span = bot_y - top_y
+        pixel_span = bot_y - top_y
         for i in range(5):
             frac = i / 4.0
-            y = bot_y - frac * span
+            y = bot_y - frac * pixel_span
             val = vmin + frac * (vmax - vmin)
             line_x2 = self.live_axis_w - 2
             line_x1 = self.live_axis_w - 12
             text_x = self.live_axis_w - 16
             self.axis_canvas.coords(self.axis_tick_lines[i], line_x1, y, line_x2, y)
             self.axis_canvas.coords(self.axis_tick_text[i], text_x, y)
-            self.axis_canvas.itemconfig(self.axis_tick_text[i], text=f"{val:.0f}")
+            self.axis_canvas.itemconfig(self.axis_tick_text[i], text=tick_fmt.format(val))
 
         self.axis_canvas.delete("axis_unit")
         self.axis_canvas.create_text(
