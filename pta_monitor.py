@@ -484,7 +484,7 @@ class PTAMonitorApp:
         ttk.Label(logging_panel, text="Log Mode:").pack(side=tk.LEFT)
         self.log_mode_var = tk.StringVar(value="Stream")
         self.log_mode_combo = ttk.Combobox(logging_panel, width=9, textvariable=self.log_mode_var, state="readonly")
-        self.log_mode_combo["values"] = ["Snapshot", "Sample", "Stream"]
+        self.log_mode_combo["values"] = ["Snapshot", "Sample", "Average", "Stream"]
         self.log_mode_combo.pack(side=tk.LEFT, padx=(4, 8))
         self.log_mode_combo.bind("<<ComboboxSelected>>", self._on_log_mode_changed)
 
@@ -505,12 +505,14 @@ class PTAMonitorApp:
         self.log_dir_var = tk.StringVar(value=str(Path.cwd()))
         ttk.Entry(logging_panel, width=34, textvariable=self.log_dir_var).pack(side=tk.LEFT, padx=(0, 4))
         ttk.Button(logging_panel, text="Folder", command=self.browse_log_folder).pack(side=tk.LEFT)
-        ttk.Button(logging_panel, text="Take Data", command=self.take_data).pack(side=tk.LEFT, padx=(12, 4))
+        self.take_data_button = ttk.Button(logging_panel, text="Take Data", command=self.take_data)
+        self.take_data_button.pack(side=tk.LEFT, padx=(12, 4))
         ttk.Button(logging_panel, text="Save Data", command=self.save_data).pack(side=tk.LEFT, padx=4)
         ttk.Button(logging_panel, text="Clear Data", command=self.clear_data).pack(side=tk.LEFT, padx=4)
         self.take_data_label = ttk.Label(logging_panel, text="Captured: 0", font=("Segoe UI Semibold", 12))
         self.take_data_label.pack(side=tk.LEFT, padx=(8, 0))
         self._sync_sample_count_state()
+        self._update_take_data_button_text()
 
         bottom = ttk.Frame(self.root, padding=(8, 4, 8, 8))
         bottom.pack(fill=tk.X)
@@ -530,9 +532,20 @@ class PTAMonitorApp:
 
     def _on_log_mode_changed(self, _event=None) -> None:
         self._sync_sample_count_state()
+        self._update_take_data_button_text()
+
+    def _update_take_data_button_text(self) -> None:
+        mode = self.log_mode_var.get()
+        if mode == "Snapshot":
+            label = "Take sample"
+        elif mode == "Stream" and self.capture_mode_running:
+            label = "Stop sampling"
+        else:
+            label = "Start sampling"
+        self.take_data_button.config(text=label)
 
     def _sync_sample_count_state(self) -> None:
-        is_sample_mode = self.log_mode_var.get() == "Sample"
+        is_sample_mode = self.log_mode_var.get() in ("Sample", "Average")
         if is_sample_mode:
             self.sample_count_entry.config(
                 state="normal",
@@ -774,7 +787,7 @@ class PTAMonitorApp:
     def _default_filename(self) -> str:
         now = datetime.now()
         month = now.strftime("%b").lower()
-        return f"PTA_{month}_{now.day}_{now.hour:02d}_{now.minute:02d}_{now.second:02d}.csv"
+        return f"PTA_{month}_{now.day}_{now.hour:02d}_{now.minute:02d}_{now.second:02d}_{now.microsecond // 1000:03d}.csv"
 
     def take_data(self) -> None:
         mode = self.log_mode_var.get()
@@ -793,19 +806,29 @@ class PTAMonitorApp:
             self.capture_mode_active = False
             self.capture_mode_running = False
             self.status_var.set("Snapshot captured")
+            self._update_take_data_button_text()
             return
 
-        if mode == "Sample":
+        if mode in ("Sample", "Average"):
             try:
                 target = max(1, int(self.sample_count_var.get()))
             except ValueError:
                 target = 100
                 self.sample_count_var.set("100")
+
+            if mode == "Average":
+                # Average mode exports one consolidated row, so start fresh.
+                with self.capture_lock:
+                    self.captured_cycles.clear()
+                    self.take_data_count = 0
+                self.take_data_label.config(text="Captured: 0")
+
             self.sample_target_cycles = target
             self.sample_captured_cycles = 0
             self.capture_mode_active = True
             self.capture_mode_running = True
-            self.status_var.set(f"Sample capture running ({target} cycles target)")
+            self.status_var.set(f"{mode} capture running ({target} cycles target)")
+            self._update_take_data_button_text()
             return
 
         # Stream mode: Take Data toggles start/stop.
@@ -817,6 +840,7 @@ class PTAMonitorApp:
             self.capture_mode_active = True
             self.capture_mode_running = True
             self.status_var.set("Stream capture running")
+        self._update_take_data_button_text()
 
     def save_data(self) -> None:
         with self.capture_lock:
@@ -835,17 +859,15 @@ class PTAMonitorApp:
 
         unit = self.unit_var.get()
         factor = UNIT_FACTORS.get(unit, 1.0)
-        if unit == "bar":
-            value_fmt = "{:.6f}"
-        elif unit == "psi":
-            value_fmt = "{:.4f}"
-        else:
-            value_fmt = "{:.3f}"
 
         with out.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             header = ["timestamp"] + [f"P{ch:02d} ({unit})" for ch in range(1, 25)]
             w.writerow(header)
+
+            # Carry forward most recent valid value per channel so occasional
+            # cycle-edge misses do not become NaN when post-processed.
+            last_saved_by_channel: Dict[int, str] = {}
 
             for snap in rows:
                 by_ch = {s.channel: s for s in snap}
@@ -857,10 +879,14 @@ class PTAMonitorApp:
                 for ch in range(1, 25):
                     s = by_ch.get(ch)
                     if s is None:
-                        row.append("")
+                        row.append(last_saved_by_channel.get(ch, ""))
                         continue
                     tared_bar = s.raw_bar - self.baseline_bar.get(ch, 0.0)
-                    row.append(value_fmt.format(tared_bar * factor))
+                    # Save full float resolution (round-trip safe) rather than
+                    # display-style rounded values.
+                    saved = format(tared_bar * factor, ".17g")
+                    row.append(saved)
+                    last_saved_by_channel[ch] = saved
                 w.writerow(row)
 
         with self.capture_lock:
@@ -869,6 +895,7 @@ class PTAMonitorApp:
         self.take_data_label.config(text="Captured: 0")
         self.capture_mode_active = False
         self.capture_mode_running = False
+        self._update_take_data_button_text()
 
         messagebox.showinfo("Saved", f"Saved {len(rows)} captures to:\n{out}")
 
@@ -880,6 +907,51 @@ class PTAMonitorApp:
         self.capture_mode_active = False
         self.capture_mode_running = False
         self.status_var.set("Captured data cleared")
+        self._update_take_data_button_text()
+
+    def _finalize_average_capture(self) -> None:
+        with self.capture_lock:
+            rows = list(self.captured_cycles)
+
+        if not rows:
+            return
+
+        sums: Dict[int, float] = {}
+        counts: Dict[int, int] = {}
+        latest: Dict[int, Sample] = {}
+
+        for snap in rows:
+            for s in snap:
+                sums[s.channel] = sums.get(s.channel, 0.0) + s.raw_bar
+                counts[s.channel] = counts.get(s.channel, 0) + 1
+                latest[s.channel] = s
+
+        if not counts:
+            return
+
+        ts = time.time()
+        avg_snap: List[Sample] = []
+        for ch in range(1, 25):
+            c = counts.get(ch, 0)
+            if c <= 0:
+                continue
+            src = latest[ch]
+            avg_snap.append(
+                Sample(
+                    timestamp=ts,
+                    channel=ch,
+                    addr=src.addr,
+                    cmd=src.cmd,
+                    raw_bar=sums[ch] / c,
+                    status=src.status,
+                    raw_bytes_hex="AVG",
+                )
+            )
+
+        with self.capture_lock:
+            self.captured_cycles = [avg_snap]
+            self.take_data_count = 1 if avg_snap else 0
+        self.take_data_label.config(text=f"Captured: {self.take_data_count}")
 
     def _poll_loop(self) -> None:
         assert self.serial_port is not None
@@ -892,7 +964,12 @@ class PTAMonitorApp:
                 time.sleep(0.05)
                 continue
 
-            ordered_channels = enabled_channels
+            # Rotate sweep start each cycle so any occasional timeout/miss is
+            # distributed across channels rather than recurring on edges.
+            if self.poll_start_index >= len(enabled_channels):
+                self.poll_start_index = 0
+            ordered_channels = enabled_channels[self.poll_start_index:] + enabled_channels[:self.poll_start_index]
+            self.poll_start_index = (self.poll_start_index + 1) % len(enabled_channels)
 
             cycle_samples: List[Sample] = []
             cycle_seen: set[int] = set()
@@ -958,6 +1035,15 @@ class PTAMonitorApp:
                         self.capture_mode_running = False
                         self.capture_mode_active = False
                         self.status_var.set(f"Sample capture complete ({self.sample_target_cycles} cycles)")
+                        self._update_take_data_button_text()
+                elif mode == "Average":
+                    self.sample_captured_cycles += 1
+                    if self.sample_captured_cycles >= self.sample_target_cycles:
+                        self.capture_mode_running = False
+                        self.capture_mode_active = False
+                        self._finalize_average_capture()
+                        self.status_var.set(f"Average capture complete ({self.sample_target_cycles} cycles)")
+                        self._update_take_data_button_text()
 
             elapsed = time.time() - cycle_start
 
