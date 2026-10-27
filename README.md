@@ -2,6 +2,10 @@
 
 Desktop monitor for 24-channel PTA pressure transducer arrays over RS485.
 
+## Windows drivers required
+"cp210 vcp" for virtual COM port - https://www.silabs.com/software-and-tools/usb-to-uart-bridge-vcp-drivers?tab=downloads
+"CH340" for RS485-  https://www.wch-ic.com/downloads/CH341SER_EXE.html
+
 ## Capture Modes
 
 The app has three capture modes controlled by the Log Mode selector.
