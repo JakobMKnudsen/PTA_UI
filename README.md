@@ -42,9 +42,3 @@ The app has three capture modes controlled by the Log Mode selector.
 
 - Click Clear Data to discard currently captured data without saving.
 - Use this before a new run when you do not want to keep previous captures.
-
-## Running Locally
-
-1. Create and activate a virtual environment.
-2. Install dependencies from requirements.txt.
-3. Run pta_monitor.py.
